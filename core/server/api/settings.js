@@ -1,4 +1,5 @@
 // # Settings API
+// RESTful API for the Setting resource
 var _            = require('lodash'),
     dataProvider = require('../models'),
     when         = require('when'),
@@ -16,6 +17,8 @@ var _            = require('lodash'),
     readSettingsResult,
     settingsResult,
     canEditAllSettings,
+    populateDefaultSetting,
+    hasPopulatedDefaults = false,
 
     /**
      * ## Cache
@@ -132,11 +135,11 @@ readSettingsResult = function (settingsModels) {
 
             return memo;
         }, {}),
-        themes = config().paths.availableThemes,
-        apps = config().paths.availableApps,
+        themes = config.paths.availableThemes,
+        apps = config.paths.availableApps,
         res;
 
-    if (settings.activeTheme) {
+    if (settings.activeTheme && themes) {
         res = filterPaths(themes, settings.activeTheme.value);
 
         settings.availableThemes = {
@@ -146,7 +149,7 @@ readSettingsResult = function (settingsModels) {
         };
     }
 
-    if (settings.activeApps) {
+    if (settings.activeApps && apps) {
         res = filterPaths(apps, JSON.parse(settings.activeApps.value));
 
         settings.availableApps = {
@@ -183,6 +186,38 @@ settingsResult = function (settings, type) {
 };
 
 /**
+ * ### Populate Default Setting
+ * @private
+ * @param key
+ * @param type
+ * @returns Promise(Setting)
+ */
+populateDefaultSetting = function (key) {
+    // Call populateDefault and update the settings cache
+    return dataProvider.Settings.populateDefault(key).then(function (defaultSetting) {
+        // Process the default result and add to settings cache
+        var readResult = readSettingsResult([defaultSetting]);
+
+        // Add to the settings cache
+        return updateSettingsCache(readResult).then(function () {
+            // Try to update theme with the new settings
+            // if we're in the middle of populating, this might not work
+            return config.theme.update(settings, config.url).then(function () { return; }, function () { return; });
+        }).then(function () {
+            // Get the result from the cache with permission checks
+        });
+    }).otherwise(function (err) {
+        // Pass along NotFoundError
+        if (typeof err === errors.NotFoundError) {
+            return when.reject(err);
+        }
+
+        // TODO: Different kind of error?
+        return when.reject(new errors.NotFoundError('Problem finding setting: ' + key));
+    });
+};
+
+/**
  * ### Can Edit All Settings
  * Check that this edit request is allowed for all settings requested to be updated
  * @private
@@ -190,26 +225,40 @@ settingsResult = function (settings, type) {
  * @returns {*}
  */
 canEditAllSettings = function (settingsInfo, options) {
-    var checks = _.map(settingsInfo, function (settingInfo) {
-        var setting = settingsCache[settingInfo.key];
+    var checkSettingPermissions = function (setting) {
+            if (setting.type === 'core' && !(options.context && options.context.internal)) {
+                return when.reject(
+                    new errors.NoPermissionError('Attempted to access core setting from external request')
+                );
+            }
 
-        if (!setting) {
-            return when.reject(new errors.NotFoundError('Unable to find setting: ' + settingInfo.key));
-        }
+            return canThis(options.context).edit.setting(setting.key).catch(function () {
+                return when.reject(new errors.NoPermissionError('You do not have permission to edit settings.'));
+            });
 
-        if (setting.type === 'core' && !(options.context && options.context.internal)) {
-            return when.reject(
-                new errors.NoPermissionError('Attempted to access core setting from external request')
-            );
-        }
+        },
+        checks = _.map(settingsInfo, function (settingInfo) {
+            var setting = settingsCache[settingInfo.key];
 
-        return canThis(options.context).edit.setting(settingInfo.key);
-    });
+            if (!setting) {
+                // Try to populate a default setting if not in the cache
+                return populateDefaultSetting(settingInfo.key).then(function (defaultSetting) {
+                    // Get the result from the cache with permission checks
+                    return checkSettingPermissions(defaultSetting);
+                });
+            }
+
+            return checkSettingPermissions(setting);
+        });
 
     return when.all(checks);
 };
 
-// ## API Methods
+/**
+ * ## Settings API Methods
+ *
+ * **See:** [API Methods](index.js.html#api%20methods)
+ */
 settings = {
 
     /**
@@ -218,6 +267,14 @@ settings = {
      * @returns {*}
      */
     browse: function browse(options) {
+        // First, check if we have populated the settings from default-settings yet
+        if (!hasPopulatedDefaults) {
+            return dataProvider.Settings.populateDefaults().then(function () {
+                hasPopulatedDefaults = true;
+                return settings.browse(options);
+            });
+        }
+
         options = options || {};
 
         var result = settingsResult(settingsCache, options.type);
@@ -248,30 +305,40 @@ settings = {
             options = { key: options };
         }
 
-        var setting = settingsCache[options.key],
-            result = {};
+        var getSettingsResult = function () {
+                var setting = settingsCache[options.key],
+                    result = {};
 
-        if (!setting) {
-            return when.reject(new errors.NotFoundError('Unable to find setting: ' + options.key));
+                result[options.key] = setting;
+
+                if (setting.type === 'core' && !(options.context && options.context.internal)) {
+                    return when.reject(
+                        new errors.NoPermissionError('Attempted to access core setting from external request')
+                    );
+                }
+
+                if (setting.type === 'blog') {
+                    return when(settingsResult(result));
+                }
+
+                return canThis(options.context).read.setting(options.key).then(function () {
+                    return settingsResult(result);
+                }, function () {
+                    return when.reject(new errors.NoPermissionError('You do not have permission to read settings.'));
+                });
+            };
+
+        // If the setting is not already in the cache
+        if (!settingsCache[options.key]) {
+            // Try to populate the setting from default-settings file
+            return populateDefaultSetting(options.key).then(function () {
+                // Get the result from the cache with permission checks
+                return getSettingsResult();
+            });
         }
 
-        result[options.key] = setting;
-
-        if (setting.type === 'core' && !(options.context && options.context.internal)) {
-            return when.reject(
-                new errors.NoPermissionError('Attempted to access core setting from external request')
-            );
-        }
-
-        if (setting.type === 'blog') {
-            return when(settingsResult(result));
-        }
-
-        return canThis(options.context).read.setting(options.key).then(function () {
-            return settingsResult(result);
-        }, function () {
-            return when.reject(new errors.NoPermissionError('You do not have permission to read settings.'));
-        });
+        // Get the result from the cache with permission checks
+        return getSettingsResult();
     },
 
     /**
@@ -315,7 +382,7 @@ settings = {
                 var readResult = readSettingsResult(result);
 
                 return updateSettingsCache(readResult).then(function () {
-                    return config.theme.update(settings, config().url);
+                    return config.theme.update(settings, config.url);
                 }).then(function () {
                     return settingsResult(readResult, type);
                 });
