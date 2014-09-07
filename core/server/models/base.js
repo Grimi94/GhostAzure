@@ -5,25 +5,23 @@
 // The models are internal to Ghost, only the API and some internal functions such as migration and import/export
 // accesses the models directly. All other parts of Ghost, including the blog frontend, admin UI, and apps are only
 // allowed to access data via the API.
-var bookshelf  = require('bookshelf'),
+var Bookshelf  = require('bookshelf'),
     when       = require('when'),
     moment     = require('moment'),
     _          = require('lodash'),
     uuid       = require('node-uuid'),
     config     = require('../config'),
-    utils      = require('../utils'),
+    unidecode  = require('unidecode'),
     sanitize   = require('validator').sanitize,
     schema     = require('../data/schema'),
     validation = require('../data/validation'),
-    errors     = require('../errors'),
 
     ghostBookshelf;
 
 // ### ghostBookshelf
 // Initializes a new Bookshelf instance called ghostBookshelf, for reference elsewhere in Ghost.
-ghostBookshelf = bookshelf(config.database.knex);
-// Load the registry plugin, which helps us avoid circular dependencies
-ghostBookshelf.plugin('registry');
+ghostBookshelf = Bookshelf.ghost = Bookshelf.initialize(config().database);
+ghostBookshelf.client = config().database.client;
 
 // ### ghostBookshelf.Model
 // The Base Model which other Ghost objects will inherit from,
@@ -65,31 +63,28 @@ ghostBookshelf.Model = ghostBookshelf.Model.extend({
     },
 
     creating: function (newObj, attr, options) {
+        var user = options.context && options.context.user ? options.context.user : 1;
         if (!this.get('created_by')) {
-            this.set('created_by', this.contextUser(options));
+            this.set('created_by', user);
         }
     },
 
     saving: function (newObj, attr, options) {
+        var user = options.context && options.context.user ? options.context.user : 1;
         // Remove any properties which don't belong on the model
         this.attributes = this.pick(this.permittedAttributes());
         // Store the previous attributes so we can tell what was updated later
         this._updatedAttributes = newObj.previousAttributes();
 
-        this.set('updated_by', this.contextUser(options));
+        this.set('updated_by', user);
     },
 
     // Base prototype properties will go here
     // Fix problems with dates
     fixDates: function (attrs) {
-        var self = this;
-
         _.each(attrs, function (value, key) {
-            if (value !== null
-                    && schema.tables[self.tableName].hasOwnProperty(key)
-                    && schema.tables[self.tableName][key].type === 'dateTime') {
-                // convert dateTime value into a native javascript Date object
-                attrs[key] = moment(value).toDate();
+            if (key.substr(-3) === '_at' && value !== null) {
+                attrs[key] = moment(attrs[key]).toDate();
             }
         });
 
@@ -100,26 +95,12 @@ ghostBookshelf.Model = ghostBookshelf.Model.extend({
     fixBools: function (attrs) {
         var self = this;
         _.each(attrs, function (value, key) {
-            if (schema.tables[self.tableName].hasOwnProperty(key)
-                    && schema.tables[self.tableName][key].type === 'bool') {
+            if (schema.tables[self.tableName][key].type === "bool") {
                 attrs[key] = value ? true : false;
             }
         });
 
         return attrs;
-    },
-
-    // Get the user from the options object
-    contextUser: function (options) {
-        // Default to context user
-        if (options.context && options.context.user) {
-            return options.context.user;
-        // Other wise use the internal override
-        } else if (options.context && options.context.internal) {
-            return 1;
-        } else {
-            errors.logAndThrowError(new Error('missing context'));
-        }
     },
 
     // format date before writing to DB, bools work
@@ -135,7 +116,6 @@ ghostBookshelf.Model = ghostBookshelf.Model.extend({
     toJSON: function (options) {
         var attrs = _.extend({}, this.attributes),
             self = this;
-        options = options || {};
 
         if (options && options.shallow) {
             return attrs;
@@ -145,17 +125,12 @@ ghostBookshelf.Model = ghostBookshelf.Model.extend({
             return attrs.id;
         }
 
-        if (options && options.include) {
-            this.include = _.union(this.include, options.include);
-        }
-
         _.each(this.relations, function (relation, key) {
             if (key.substring(0, 7) !== '_pivot_') {
                 // if include is set, expand to full object
-                // 'toMany' relationships are included with ids if not expanded
-                var fullKey = _.isEmpty(options.name) ? key : options.name + '.' + key;
-                if (_.contains(self.include, fullKey)) {
-                    attrs[key] = relation.toJSON({name: fullKey, include: self.include});
+                // toMany relationships are included with ids if not expanded
+                if (_.contains(self.include, key)) {
+                    attrs[key] = relation.toJSON();
                 } else if (relation.hasOwnProperty('length')) {
                     attrs[key] = relation.toJSON({idOnly: true});
                 }
@@ -189,7 +164,7 @@ ghostBookshelf.Model = ghostBookshelf.Model.extend({
      */
     permittedOptions: function () {
         // terms to whitelist for all methods.
-        return ['context', 'include', 'transacting'];
+        return ['include', 'transacting'];
     },
 
     /**
@@ -313,7 +288,7 @@ ghostBookshelf.Model = ghostBookshelf.Model.extend({
         var slug,
             slugTryCount = 1,
             baseName = Model.prototype.tableName.replace(/s$/, ''),
-            // Look for a matching slug, append an incrementing number if so
+            // Look for a post with a matching slug, append an incrementing number if so
             checkIfSlugExists;
 
         checkIfSlugExists = function (slugToFind) {
@@ -346,16 +321,28 @@ ghostBookshelf.Model = ghostBookshelf.Model.extend({
             });
         };
 
-        slug = utils.safeString(base);
+        slug = base.trim();
+
+        // Remove non ascii characters
+        slug = unidecode(slug);
+
+        // Remove URL reserved chars: `:/?#[]@!$&'()*+,;=` as well as `\%<>|^~£"`
+        slug = slug.replace(/[:\/\?#\[\]@!$&'()*+,;=\\%<>\|\^~£"]/g, '')
+            // Replace dots and spaces with a dash
+            .replace(/(\s|\.)/g, '-')
+            // Convert 2 or more dashes into a single dash
+            .replace(/-+/g, '-')
+            // Make the whole thing lowercase
+            .toLowerCase();
 
         // Remove trailing hyphen
         slug = slug.charAt(slug.length - 1) === '-' ? slug.substr(0, slug.length - 1) : slug;
 
         // Check the filtered slug doesn't match any of the reserved keywords
-        slug = /^(ghost|ghost\-admin|admin|wp\-admin|wp\-login|dashboard|logout|login|setup|signin|signup|signout|register|archive|archives|category|categories|tag|tags|page|pages|post|posts|public|user|users|rss|feed|app|apps)$/g
+        slug = /^(ghost|ghost\-admin|admin|wp\-admin|wp\-login|dashboard|logout|login|signin|signup|signout|register|archive|archives|category|categories|tag|tags|page|pages|post|posts|public|user|users|rss|feed)$/g
             .test(slug) ? slug + '-' + baseName : slug;
 
-        //if slug is empty after trimming use the model name
+        //if slug is empty after trimming use "post"
         if (!slug) {
             slug = baseName;
         }

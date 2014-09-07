@@ -1,35 +1,18 @@
 var ghostBookshelf = require('./base'),
+    AppSetting     = require('./appSetting'),
     App,
     Apps;
-
-
 
 App = ghostBookshelf.Model.extend({
     tableName: 'apps',
 
-    saving: function (newPage, attr, options) {
-         /*jshint unused:false*/
-        var self = this;
-
-        ghostBookshelf.Model.prototype.saving.apply(this, arguments);
-
-        if (this.hasChanged('slug') || !this.get('slug')) {
-            // Pass the new slug through the generator to strip illegal characters, detect duplicates
-            return ghostBookshelf.Model.generateSlug(App, this.get('slug') || this.get('name'),
-                {transacting: options.transacting})
-                .then(function (slug) {
-                    self.set({slug: slug});
-                });
-        }
-    },
-
     permissions: function () {
         // Have to use the require here because of circular dependencies
-        return this.belongsToMany('Permission', 'permissions_apps');
+        return this.belongsToMany(require('./permission').Permission, 'permissions_apps');
     },
 
     settings: function () {
-        return this.belongsToMany('AppSetting', 'app_settings');
+        return this.belongsToMany(AppSetting, 'app_settings');
     }
 }, {
     /**
@@ -59,6 +42,6 @@ Apps = ghostBookshelf.Collection.extend({
 });
 
 module.exports = {
-    App: ghostBookshelf.model('App', App),
-    Apps: ghostBookshelf.collection('Apps', Apps)
+    App: App,
+    Apps: Apps
 };

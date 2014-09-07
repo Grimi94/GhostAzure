@@ -1,4 +1,5 @@
-var ghostBookshelf = require('./base'),
+var Posts          = require('./post').Posts,
+    ghostBookshelf = require('./base'),
 
     Tag,
     Tags;
@@ -25,7 +26,7 @@ Tag = ghostBookshelf.Model.extend({
     },
 
     posts: function () {
-        return this.belongsToMany('Post');
+        return this.belongsToMany(Posts);
     },
 
     toJSON: function (options) {
@@ -36,13 +37,36 @@ Tag = ghostBookshelf.Model.extend({
 
         return attrs;
     }
+}, {
+    /**
+    * Returns an array of keys permitted in a method's `options` hash, depending on the current method.
+    * @param {String} methodName The name of the method to check valid options for.
+    * @return {Array} Keys allowed in the `options` hash of the model's method.
+    */
+    permittedOptions: function (methodName) {
+        var options = ghostBookshelf.Model.permittedOptions(),
+
+            // whitelists for the `options` hash argument on methods, by method name.
+            // these are the only options that can be passed to Bookshelf / Knex.
+            validOptions = {
+                add: ['user']
+            };
+
+        if (validOptions[methodName]) {
+            options = options.concat(validOptions[methodName]);
+        }
+
+        return options;
+    }
 });
 
 Tags = ghostBookshelf.Collection.extend({
+
     model: Tag
+
 });
 
 module.exports = {
-    Tag: ghostBookshelf.model('Tag', Tag),
-    Tags: ghostBookshelf.collection('Tags', Tags)
+    Tag: Tag,
+    Tags: Tags
 };

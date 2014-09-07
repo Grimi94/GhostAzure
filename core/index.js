@@ -21,16 +21,16 @@ function startGhost(options) {
             var ghost = require('./server');
             return ghost(options.app)
                 .then(deferred.resolve)
-                    .catch(function (err) {
+                    .otherwise(function (e) {
                     // We don't return the rejected promise to stop
-                    // the propagation of the rejection and just
+                    // the propogation of the rejection and just
                     // allow the user to manage what to do.
-                    deferred.reject(err);
+                    deferred.reject(e);
                 });
         } catch (e) {
             deferred.reject(e);
         }
-    }).catch(deferred.reject);
+    });
 
     return deferred.promise;
 }

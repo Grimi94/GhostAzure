@@ -2,17 +2,19 @@ var BusBoy  = require('busboy'),
     fs      = require('fs-extra'),
     path    = require('path'),
     os      = require('os'),
-    crypto  = require('crypto');
+    crypto  = require('crypto'),
+    errors  = require('../errors');
 
 // ### ghostBusboy
 // Process multipart file streams
 function ghostBusBoy(req, res, next) {
     var busboy,
         stream,
-        tmpDir;
+        tmpDir,
+        hasError = false;
 
     // busboy is only used for POST requests
-    if (req.method && !/post/i.test(req.method)) {
+    if (req.method && !req.method.match(/post/i)) {
         return next();
     }
 
@@ -27,9 +29,13 @@ function ghostBusBoy(req, res, next) {
             tmpFileName,
             md5 = crypto.createHash('md5');
 
-        // If the filename is invalid, skip the stream
+        // If the filename is invalid, mark an error
         if (!filename) {
-            return file.resume();
+            hasError = true;
+        }
+        // If we've flagged any errors, do not process any streams
+        if (hasError) {
+            return file.emit('end');
         }
 
         // Create an MD5 hash of original filename
@@ -48,7 +54,12 @@ function ghostBusBoy(req, res, next) {
             };
         });
 
-        file.on('error', function (error) {
+        busboy.on('limit', function () {
+            hasError = true;
+            res.send(413, new errors.RequestEntityTooLargeError('File size limit breached.'));
+        });
+
+        busboy.on('error', function (error) {
             console.log('Error', 'Something went wrong uploading the file', error);
         });
 
@@ -62,16 +73,11 @@ function ghostBusBoy(req, res, next) {
 
     });
 
-    busboy.on('error', function (error) {
-        console.log('Error', 'Something went wrong parsing the form', error);
-        res.status(500).send({code: 500, message: 'Could not parse upload completely.'});
-    });
-
     busboy.on('field', function (fieldname, val) {
         req.body[fieldname] = val;
     });
 
-    busboy.on('finish', function () {
+    busboy.on('end', function () {
         next();
     });
 

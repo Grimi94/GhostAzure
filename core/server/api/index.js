@@ -1,35 +1,25 @@
 // # Ghost Data API
-// Provides access from anywhere to the Ghost data layer.
-//
-// Ghost's JSON API is integral to the workings of Ghost, regardless of whether you want to access data internally,
-// from a theme, an app, or from an external app, you'll use the Ghost JSON API to do so.
+// Provides access to the data model
 
-var _              = require('lodash'),
-    when           = require('when'),
-    config         = require('../config'),
+var _             = require('lodash'),
+    when          = require('when'),
+    config        = require('../config'),
     // Include Endpoints
-    db             = require('./db'),
-    mail           = require('./mail'),
-    notifications  = require('./notifications'),
-    posts          = require('./posts'),
-    roles          = require('./roles'),
-    settings       = require('./settings'),
-    tags           = require('./tags'),
-    themes         = require('./themes'),
-    users          = require('./users'),
-    slugs          = require('./slugs'),
-    authentication = require('./authentication'),
-    uploads        = require('./upload'),
-    dataExport     = require('../data/export'),
-    errors         = require('../errors'),
+    db            = require('./db'),
+    mail          = require('./mail'),
+    notifications = require('./notifications'),
+    posts         = require('./posts'),
+    settings      = require('./settings'),
+    tags          = require('./tags'),
+    themes        = require('./themes'),
+    users         = require('./users'),
 
     http,
     formatHttpErrors,
-    addHeaders,
     cacheInvalidationHeader,
     locationHeader,
     contentDispositionHeader,
-    init;
+    init,
 
 /**
  * ### Init
@@ -54,33 +44,32 @@ init = function () {
  * @return {Promise(String)} Resolves to header string
  */
 cacheInvalidationHeader = function (req, result) {
-    var parsedUrl = req._parsedUrl.pathname.replace(/^\/|\/$/g, '').split('/'),
+    var parsedUrl = req._parsedUrl.pathname.replace(/\/$/, '').split('/'),
         method = req.method,
-        endpoint = parsedUrl[0],
-        id = parsedUrl[1],
+        endpoint = parsedUrl[4],
+        id = parsedUrl[5],
         cacheInvalidate,
         jsonResult = result.toJSON ? result.toJSON() : result,
         post,
-        hasStatusChanged,
-        wasDeleted,
-        wasPublishedUpdated;
+        wasPublished,
+        wasDeleted;
 
     if (method === 'POST' || method === 'PUT' || method === 'DELETE') {
         if (endpoint === 'settings' || endpoint === 'users' || endpoint === 'db') {
             cacheInvalidate = '/*';
         } else if (endpoint === 'posts') {
             post = jsonResult.posts[0];
-            hasStatusChanged = post.statusChanged;
+            wasPublished = post.statusChanged && post.status === 'published';
             wasDeleted = method === 'DELETE';
-            // Invalidate cache when post was updated but not when post is draft
-            wasPublishedUpdated = method === 'PUT' && post.status === 'published';
 
             // Remove the statusChanged value from the response
-            delete post.statusChanged;
+            if (post.statusChanged) {
+                delete post.statusChanged;
+            }
 
             // Don't set x-cache-invalidate header for drafts
-            if (hasStatusChanged || wasDeleted || wasPublishedUpdated) {
-                cacheInvalidate = '/, /page/*, /rss/, /rss/*, /tag/*, /author/*';
+            if (wasPublished || wasDeleted) {
+                cacheInvalidate = '/, /page/*, /rss/, /rss/*, /tag/*';
                 if (id && post.slug) {
                     return config.urlForPost(settings, post).then(function (postUrl) {
                         return cacheInvalidate + ', ' + postUrl;
@@ -107,18 +96,18 @@ cacheInvalidationHeader = function (req, result) {
 locationHeader = function (req, result) {
     var apiRoot = config.urlFor('api'),
         location,
-        newObject;
+        post,
+        notification,
+        parsedUrl = req._parsedUrl.pathname.replace(/\/$/, '').split('/'),
+        endpoint = parsedUrl[4];
 
     if (req.method === 'POST') {
         if (result.hasOwnProperty('posts')) {
-            newObject = result.posts[0];
-            location = apiRoot + '/posts/' + newObject.id + '/?status=' + newObject.status;
-        } else if (result.hasOwnProperty('notifications')) {
-            newObject = result.notifications[0];
-            location = apiRoot + '/notifications/' + newObject.id;
-        } else if (result.hasOwnProperty('users')) {
-            newObject = result.users[0];
-            location = apiRoot + '/users/' + newObject.id;
+            post = result.posts[0];
+            location = apiRoot + '/posts/' + post.id + '/?status=' + post.status;
+        } else if (endpoint === 'notifications') {
+            notification = result.notifications;
+            location = apiRoot + '/notifications/' + notification[0].id;
         }
     }
 
@@ -140,9 +129,9 @@ locationHeader = function (req, result) {
  * @return {string}
  */
 contentDispositionHeader = function () {
-    return dataExport.fileName().then(function (filename) {
-        return 'Attachment; filename="' + filename + '"';
-    });
+    // replace ':' with '_' for OS that don't support it
+    var now = (new Date()).toJSON().replace(/:/g, '_');
+    return 'Attachment; filename="ghost-' + now + '.json"';
 };
 
 
@@ -177,51 +166,6 @@ formatHttpErrors = function (error) {
     return {errors: errors, statusCode: statusCode};
 };
 
-
-addHeaders = function (apiMethod, req, res, result) {
-    var ops = [],
-        cacheInvalidation,
-        location,
-        contentDisposition;
-
-    cacheInvalidation = cacheInvalidationHeader(req, result)
-        .then(function addCacheHeader(header) {
-            if (header) {
-                res.set({'X-Cache-Invalidate': header});
-            }
-        });
-
-    ops.push(cacheInvalidation);
-
-    if (req.method === 'POST') {
-        location = locationHeader(req, result)
-            .then(function addLocationHeader(header) {
-                if (header) {
-                    res.set({'Location': header});
-                    // The location header indicates that a new object was created.
-                    // In this case the status code should be 201 Created
-                    res.status(201);
-                }
-            });
-        ops.push(location);
-    }
-
-    if (apiMethod === db.exportContent) {
-        contentDisposition = contentDispositionHeader()
-            .then(function addContentDispositionHeader(header) {
-                // Add Content-Disposition Header
-                if (apiMethod === db.exportContent) {
-                    res.set({
-                        'Content-Disposition': header
-                    });
-                }
-            });
-        ops.push(contentDisposition);
-    }
-
-    return when.all(ops);
-};
-
 /**
  * ### HTTP
  *
@@ -236,10 +180,9 @@ http = function (apiMethod) {
     return function (req, res) {
         // We define 2 properties for using as arguments in API calls:
         var object = req.body,
-            response,
             options = _.extend({}, req.files, req.query, req.params, {
                 context: {
-                    user: (req.user && req.user.id) ? req.user.id : null
+                    user: (req.session && req.session.user) ? req.session.user : null
                 }
             });
 
@@ -253,19 +196,35 @@ http = function (apiMethod) {
         return apiMethod(object, options)
             // Handle adding headers
             .then(function onSuccess(result) {
-                response = result;
                 // Add X-Cache-Invalidate header
-                return addHeaders(apiMethod, req, res, result);
-            }).then(function () {
-                // #### Success
-                // Send a properly formatting HTTP response containing the data with correct headers
-                res.json(response || {});
+                return cacheInvalidationHeader(req, result)
+                    .then(function addCacheHeader(header) {
+                        if (header) {
+                            res.set({'X-Cache-Invalidate': header});
+                        }
+
+                        // Add Location header
+                        return locationHeader(req, result);
+                    }).then(function addLocationHeader(header) {
+                        if (header) {
+                            res.set({'Location': header});
+                        }
+
+                        // Add Content-Disposition Header
+                        if (apiMethod === db.exportContent) {
+                            res.set({
+                                'Content-Disposition': contentDispositionHeader()
+                            });
+                        }
+                        // #### Success
+                        // Send a properly formatting HTTP response containing the data with correct headers
+                        res.json(result || {});
+                    });
             }).catch(function onError(error) {
-                errors.logError(error);
                 // #### Error
                 var httpErrors = formatHttpErrors(error);
                 // Send a properly formatted HTTP response containing the errors
-                res.status(httpErrors.statusCode).json({errors: httpErrors.errors});
+                res.json(httpErrors.statusCode, {errors: httpErrors.errors});
             });
     };
 };
@@ -282,31 +241,8 @@ module.exports = {
     mail: mail,
     notifications: notifications,
     posts: posts,
-    roles: roles,
     settings: settings,
     tags: tags,
     themes: themes,
-    users: users,
-    slugs: slugs,
-    authentication: authentication,
-    uploads: uploads
+    users: users
 };
-
-/**
- * ## API Methods
- *
- * Most API methods follow the BREAD pattern, although not all BREAD methods are available for all resources.
- * Most API methods have a similar signature, they either take just `options`, or both `object` and `options`.
- * For RESTful resources `object` is always a model object of the correct type in the form `name: [{object}]`
- * `options` is an object with several named properties, the possibilities are listed for each method.
- *
- * Read / Edit / Destroy routes expect some sort of identifier (id / slug / key) for which object they are handling
- *
- * All API methods take a context object as one of the options:
- *
- * @typedef context
- * Context provides information for determining permissions. Usually a user, but sometimes an app, or the internal flag
- * @param {Number} user (optional)
- * @param {String} app (optional)
- * @param {Boolean} internal (optional)
- */

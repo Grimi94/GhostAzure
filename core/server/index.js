@@ -16,10 +16,10 @@ var crypto      = require('crypto'),
     helpers     = require('./helpers'),
     mailer      = require('./mail'),
     middleware  = require('./middleware'),
-    migrations  = require('./data/migration'),
     models      = require('./models'),
     permissions = require('./permissions'),
     apps        = require('./apps'),
+    routes      = require('./routes'),
     packageInfo = require('../../package.json'),
 
 // Variables
@@ -41,14 +41,14 @@ function doFirstRun() {
         '</strong>environment.',
 
         'Your URL is set to',
-        '<strong>' + config.url + '</strong>.',
-        'See <a href="http://support.ghost.org/">http://support.ghost.org</a> for instructions.'
+        '<strong>' + config().url + '</strong>.',
+        'See <a href="http://docs.ghost.org/">http://docs.ghost.org</a> for instructions.'
     ];
 
-    return api.notifications.add({ notifications: [{
+    return api.notifications.add({
         type: 'info',
         message: firstRunMessage.join(' ')
-    }] }, {context: {internal: true}});
+    });
 }
 
 function initDbHashAndFirstRun() {
@@ -76,10 +76,10 @@ function initDbHashAndFirstRun() {
 // any are missing.
 function builtFilesExist() {
     var deferreds = [],
-        location = config.paths.builtScriptPath,
+        location = config().paths.builtScriptPath,
 
         fileNames = process.env.NODE_ENV === 'production' ?
-            helpers.scriptFiles.production : helpers.scriptFiles.development;
+                helpers.scriptFiles.production : helpers.scriptFiles.development;
 
     function checkExist(fileName) {
         var deferred = when.defer(),
@@ -128,12 +128,12 @@ function ghostStartMessages() {
         console.log(
             "Ghost is running...".green,
             "\nYour blog is now available on",
-            config.url,
+            config().url,
             "\nCtrl+C to shut down".grey
         );
 
         // ensure that Ghost exits correctly on Ctrl+C
-        process.removeAllListeners('SIGINT').on('SIGINT', function () {
+        process.on('SIGINT', function () {
             console.log(
                 "\nGhost has shut down".red,
                 "\nYour blog is now offline"
@@ -144,13 +144,13 @@ function ghostStartMessages() {
         console.log(
             ("Ghost is running in " + process.env.NODE_ENV + "...").green,
             "\nListening on",
-                config.getSocket() || config.server.host + ':' + config.server.port,
+                config.getSocket() || config().server.host + ':' + config().server.port,
             "\nUrl configured as:",
-            config.url,
+            config().url,
             "\nCtrl+C to shut down".grey
         );
         // ensure that Ghost exits correctly on Ctrl+C
-        process.removeAllListeners('SIGINT').on('SIGINT', function () {
+        process.on('SIGINT', function () {
             console.log(
                 "\nGhost has shutdown".red,
                 "\nGhost was running for",
@@ -159,34 +159,6 @@ function ghostStartMessages() {
             );
             process.exit(0);
         });
-    }
-}
-
-
-// This is run after every initialization is done, right before starting server.
-// Its main purpose is to move adding notifications here, so none of the submodules
-// should need to include api, which previously resulted in circular dependencies.
-// This is also a "one central repository" of adding startup notifications in case
-// in the future apps will want to hook into here
-function initNotifications() {
-    if (mailer.state && mailer.state.usingSendmail) {
-        api.notifications.add({ notifications: [{
-            type: 'info',
-            message: [
-                "Ghost is attempting to use your server's <b>sendmail</b> to send e-mail.",
-                "It is recommended that you explicitly configure an e-mail service,",
-                "See <a href=\"http://support.ghost.org/mail\">http://support.ghost.org/mail</a> for instructions"
-            ].join(' ')
-        }] }, {context: {internal: true}});
-    }
-    if (mailer.state && mailer.state.emailDisabled) {
-        api.notifications.add({ notifications: [{
-            type: 'warn',
-            message: [
-                "Ghost is currently unable to send e-mail.",
-                "See <a href=\"http://support.ghost.org/mail\">http://support.ghost.org/mail</a> for instructions"
-            ].join(' ')
-        }] }, {context: {internal: true}});
     }
 }
 
@@ -217,9 +189,6 @@ function init(server) {
         // Initialise the models
         return models.init();
     }).then(function () {
-        // Initialize migrations
-        return migrations.init();
-    }).then(function () {
         // Populate any missing default settings
         return models.Settings.populateDefaults();
     }).then(function () {
@@ -232,7 +201,7 @@ function init(server) {
     }).then(function () {
         // We must pass the api.settings object
         // into this method due to circular dependencies.
-        return config.theme.update(api.settings, config.url);
+        return config.theme.update(api.settings, config().url);
     }).then(function () {
         return when.join(
             // Check for or initialise a dbHash.
@@ -246,15 +215,13 @@ function init(server) {
         var adminHbs = hbs.create(),
             deferred = when.defer();
 
-        // Output necessary notifications on init
-        initNotifications();
         // ##Configuration
 
         // return the correct mime type for woff filess
         express['static'].mime.define({'application/font-woff': ['woff']});
 
         // enabled gzip compression by default
-        if (config.server.compress !== false) {
+        if (config().server.compress !== false) {
             server.use(compress());
         }
 
@@ -263,41 +230,49 @@ function init(server) {
         server.set('view engine', 'hbs');
 
         // Create a hbs instance for admin and init view engine
-        server.set('admin view engine', adminHbs.express3({}));
+        server.set('admin view engine', adminHbs.express3({partialsDir: config().paths.adminViews + 'partials'}));
 
         // Load helpers
         helpers.loadCoreHelpers(adminHbs, assetHash);
 
-        // ## Middleware and Routing
+        // ## Middleware
         middleware(server, dbHash);
 
+        // ## Routing
+
+        // Set up API routes
+        routes.api(server);
+
+        // Set up Admin routes
+        routes.admin(server);
+
+        // Set up Frontend routes
+        routes.frontend(server);
+
         // Log all theme errors and warnings
-        _.each(config.paths.availableThemes._messages.errors, function (error) {
+        _.each(config().paths.availableThemes._messages.errors, function (error) {
             errors.logError(error.message, error.context, error.help);
         });
 
-        _.each(config.paths.availableThemes._messages.warns, function (warn) {
+        _.each(config().paths.availableThemes._messages.warns, function (warn) {
             errors.logWarn(warn.message, warn.context, warn.help);
         });
 
         // ## Start Ghost App
         if (config.getSocket()) {
             // Make sure the socket is gone before trying to create another
-            try {
-                fs.unlinkSync(config.getSocket());
-            } catch (e) {
-                // We can ignore this.
-            }
-
-            httpServer = server.listen(
-                config.getSocket()
-            );
-            fs.chmod(config.getSocket(), '0660');
+            fs.unlink(config.getSocket(), function (err) {
+                /*jshint unused:false*/
+                httpServer = server.listen(
+                    config.getSocket()
+                );
+                fs.chmod(config.getSocket(), '0660');
+            });
 
         } else {
             httpServer = server.listen(
-                config.server.port,
-                config.server.host
+                config().server.port,
+                config().server.host
             );
         }
 

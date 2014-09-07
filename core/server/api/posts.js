@@ -1,5 +1,4 @@
 // # Posts API
-// RESTful API for the Post resource
 var when            = require('when'),
     _               = require('lodash'),
     dataProvider    = require('../models'),
@@ -25,31 +24,19 @@ function prepareInclude(include) {
     return include;
 }
 
-/**
- * ## Posts API Methods
- *
- * **See:** [API Methods](index.js.html#api%20methods)
- */
+// ## API Methods
 posts = {
 
     /**
      * ### Browse
      * Find a paginated set of posts
-     *
-     * Will only return published posts unless we have an authenticated user and an alternative status
-     * parameter.
-     *
-     * Will return without static pages unless told otherwise
-     *
-     * Can return posts for a particular tag by passing a tag slug in
-     *
-     * @public
      * @param {{context, page, limit, status, staticPages, tag}} options (optional)
      * @returns {Promise(Posts)} Posts Collection with Meta
      */
     browse: function browse(options) {
         options = options || {};
 
+        // only published posts if no user is present
         if (!(options.context && options.context.user)) {
             options.status = 'published';
         }
@@ -64,8 +51,6 @@ posts = {
     /**
      * ### Read
      * Find a post, by ID or Slug
-     *
-     * @public
      * @param {{id_or_slug (required), context, status, include, ...}} options
      * @return {Promise(Post)} Post
      */
@@ -96,8 +81,6 @@ posts = {
     /**
      * ### Edit
      * Update properties of a post
-     *
-     * @public
      * @param {Post} object Post or specific properties to update
      * @param {{id (required), context, include,...}} options
      * @return {Promise(Post)} Edited Post
@@ -114,8 +97,7 @@ posts = {
                 if (result) {
                     var post = result.toJSON();
 
-                    // If previously was not published and now is (or vice versa), signal the change
-                    post.statusChanged = false;
+                    // If previously was not published and now is, signal the change
                     if (result.updated('status') !== result.get('status')) {
                         post.statusChanged = true;
                     }
@@ -132,8 +114,6 @@ posts = {
     /**
      * ### Add
      * Create a new post along with any tags
-     *
-     * @public
      * @param {Post} object
      * @param {{context, include,...}} options
      * @return {Promise(Post)} Created Post
@@ -141,7 +121,7 @@ posts = {
     add: function add(object, options) {
         options = options || {};
 
-        return canThis(options.context).add.post().then(function () {
+        return canThis(options.context).create.post().then(function () {
             return utils.checkObject(object, docName).then(function (checkedPostData) {
                 if (options.include) {
                     options.include = prepareInclude(options.include);
@@ -166,13 +146,11 @@ posts = {
     /**
      * ### Destroy
      * Delete a post, cleans up tag relations, but not unused tags
-     *
-     * @public
      * @param {{id (required), context,...}} options
      * @return {Promise(Post)} Deleted Post
      */
     destroy: function destroy(options) {
-        return canThis(options.context).destroy.post(options.id).then(function () {
+        return canThis(options.context).remove.post(options.id).then(function () {
             var readOptions = _.extend({}, options, {status: 'all'});
             return posts.read(readOptions).then(function (result) {
                 return dataProvider.Post.destroy(options).then(function () {
@@ -189,6 +167,26 @@ posts = {
             });
         }, function () {
             return when.reject(new errors.NoPermissionError('You do not have permission to remove posts.'));
+        });
+    },
+
+    /**
+     * ## Generate Slug
+     * Create a unique slug for a given post title
+     * @param {{title (required), transacting}} options
+     * @returns {Promise(String)} Unique string
+     */
+    generateSlug: function generateSlug(options) {
+        return canThis(options.context).slug.post().then(function () {
+            return dataProvider.Base.Model.generateSlug(dataProvider.Post, options.title, {status: 'all'})
+                .then(function (slug) {
+                    if (slug) {
+                        return slug;
+                    }
+                    return when.reject(new errors.InternalServerError('Could not generate slug'));
+                });
+        }, function () {
+            return when.reject(new errors.NoPermissionError('You do not have permission.'));
         });
     }
 
